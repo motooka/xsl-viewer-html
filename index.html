@@ -81,7 +81,7 @@
        * */
       const convertXsl = async (sourceFiles) => {
         const unCompressPromises = sourceFiles.map(async (file) => {
-          if (file.type === "application/x-zip-compressed") {
+          if (file.type.match(/^application\/(x-zip-compressed|zip)$/)) {
             return file.arrayBuffer().then(decompressZip);
           }
           return file;
