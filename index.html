@@ -12,6 +12,26 @@
         margin: 0;
         padding: 0;
       }
+      .container {
+        padding: 16px;
+      }
+      .container > div {
+        /* 健康保険・厚生年金保険被保険者標準報酬改定通知書 を表示する際に、コンテンツの中から div 要素全てに white-space: pre が指定されて、大きな余白が出る問題への対処。 */
+        white-space: normal;
+      }
+      pre.oshirase {
+        /* 健康保険・厚生年金保険被保険者標準報酬改定通知書 をMacのFirefox&Chromeで表示する際に「CSSを完全に理解」状態になる問題への対応。なぜかSafariはこれ無しで正しく動作する。*/
+        text-wrap-mode: wrap;
+      }
+      @media print {
+        .container {
+          padding: 0;
+        }
+        .container > h1,
+        .container > hr {
+            display: none;
+        }
+      }
     </style>
     <script>
       /**
@@ -137,7 +157,7 @@
             const contents = document.createElement("div");
             contents.innerHTML = doc;
             const div = document.createElement("div");
-            div.style.padding = "16px";
+            div.setAttribute("class", "container");
             const header = document.createElement("h1");
             header.innerText = name;
             const hr = document.createElement("hr");
