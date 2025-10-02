@@ -15,6 +15,10 @@
       .container {
         padding: 16px;
       }
+      .container > div {
+          /* 健康保険・厚生年金保険被保険者標準報酬改定通知書 を表示する際に、コンテンツの中から div 要素全てに white-space: pre が指定されて、大きな余白が出る問題への対処。 */
+          white-space: normal;
+      }
       @media print {
         .container {
           padding: 0;
