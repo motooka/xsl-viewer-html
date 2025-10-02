@@ -12,6 +12,18 @@
         margin: 0;
         padding: 0;
       }
+      .container {
+        padding: 16px;
+      }
+      @media print {
+        .container {
+          padding: 0;
+        }
+        .container > h1,
+        .container > hr {
+            display: none;
+        }
+      }
     </style>
     <script>
       /**
@@ -137,7 +149,7 @@
             const contents = document.createElement("div");
             contents.innerHTML = doc;
             const div = document.createElement("div");
-            div.style.padding = "16px";
+            div.setAttribute("class", "container");
             const header = document.createElement("h1");
             header.innerText = name;
             const hr = document.createElement("hr");
