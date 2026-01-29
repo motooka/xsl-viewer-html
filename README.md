@@ -7,7 +7,7 @@ https://sorakumo001.github.io/xsl-viewer-html/
 
 ## 使い方
 
-Chromium系のブラウザでファイルをドラッグドロップすると以下のように表示されます
+Chromium系のブラウザでZIPファイル、もしくは展開したファイルをまとめてドラッグドロップすると、以下のように表示されます
 
 ![screenshot](document/image.png)
 
