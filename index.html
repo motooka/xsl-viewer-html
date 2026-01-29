@@ -1,74 +1,106 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <title>XSL Viewer</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      html,
-      body {
-        min-height: 100%;
-        min-width: 100%;
-        margin: 0;
-        padding: 16px;
-      }
-      @media print {
-        .container {
-          padding: 0;
-        }
-        .container > h1,
-        .container > hr {
-            display: none;
-        }
+
+<head>
+  <title>XSL Viewer</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,
+    body {
+      min-height: 100%;
+      min-width: 100%;
+      margin: 0;
+    }
+
+    .container {
+      padding: 0 16px;
+    }
+
+    iframe {
+      min-width: 1122px;
+      border: none;
+      display: block;
+      margin: auto;
+    }
+
+    .container-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+
+    }
+
+    .container-list>*+* {
+      border-top: 1px solid #e5e7eb;
+    }
+
+    @media print {
+      .container-list>*+* {
+        border-top: none;
       }
 
-    </style>
-    <script>
+      .container {
+        padding: 0;
+
+        &>h1 {
+          display: none;
+        }
+      }
+    }
+  </style>
+  <script>
+    /**
+     * Utilities for handling ZIP files.
+     * @namespace
+     */
+    const ZipUtils = {
       /**
-       * @param {arrayBuffer} ArrayBuffer
-       * @returns {Promise<File[]>}
+       * Decompresses raw deflate data.
+       * @param {ArrayBuffer} compressedData - The compressed data.
+       * @returns {Promise<Blob>} The decompressed data as a Blob.
        */
-      const decompressZip = async (arrayBuffer) => {
-        async function decompressData(compressedData) {
-          const reader = new Blob([compressedData])
-            .stream()
-            .pipeThrough(new DecompressionStream("deflate-raw"))
-            .getReader();
-          const chunks = [];
-          let result = await reader.read();
-          while (!result.done) {
-            chunks.push(result.value);
-            result = await reader.read();
-          }
-          return new Blob(chunks);
-        }
+      async decompressData(compressedData) {
+        const stream = new Blob([compressedData])
+          .stream()
+          .pipeThrough(new DecompressionStream("deflate-raw"));
+        return new Response(stream).blob();
+      },
 
+      /**
+       * Parses a ZIP file ArrayBuffer and extracts files.
+       * @param {ArrayBuffer} arrayBuffer - The raw ZIP file data.
+       * @returns {Promise<File[]>} An array of extracted File objects.
+       */
+      async parse(arrayBuffer) {
         const dataView = new DataView(arrayBuffer);
         let offset = 0;
         const files = [];
+        const decoderUtf8 = new TextDecoder("utf-8");
+        const decoderSjis = new TextDecoder("shift-jis");
 
         while (offset < dataView.byteLength) {
           const signature = dataView.getUint32(offset, true);
           if (signature !== 0x04034b50) break;
+
           const generalPurposeFlag = dataView.getUint16(offset + 6, true);
           const fileNameLength = dataView.getUint16(offset + 26, true);
           const extraFieldLength = dataView.getUint16(offset + 28, true);
           let compressedSize = dataView.getUint32(offset + 18, true);
-          
+
           const isUtf8 = (generalPurposeFlag & 0x0800) !== 0;
-          const decoder = new TextDecoder(isUtf8 ? "utf-8" : "shift-jis");
-          const pathName = decoder.decode(
-            arrayBuffer.slice(offset + 30, offset + 30 + fileNameLength)
-          );
+          const fileNameBuffer = arrayBuffer.slice(offset + 30, offset + 30 + fileNameLength);
+          const pathName = (isUtf8 ? decoderUtf8 : decoderSjis).decode(fileNameBuffer);
 
-          offset += fileNameLength + extraFieldLength + 30;
+          offset += 30 + fileNameLength + extraFieldLength;
           const dataOffset = offset;
-          const isDataDescriptor = (generalPurposeFlag & 0x0008) !== 0;
 
+          // Check for Data Descriptor
+          const isDataDescriptor = (generalPurposeFlag & 0x0008) !== 0;
           if (isDataDescriptor) {
+            // Scan for signature 0x08074b50
             while (offset < dataView.byteLength) {
-              const potentialSignature = dataView.getUint32(offset, true);
-              if (potentialSignature === 0x08074b50) {
+              if (dataView.getUint32(offset, true) === 0x08074b50) {
                 compressedSize = dataView.getUint32(offset + 8, true);
                 offset += 16;
                 break;
@@ -79,202 +111,314 @@
             offset += compressedSize;
           }
 
-          if (pathName[pathName.length - 1] !== "/") {
-            const decompressedData = await decompressData(
-              arrayBuffer.slice(dataOffset, dataOffset + compressedSize)
-            );
-            const fileName = pathName.replace(/.*\//, "");
-            files.push(new File([decompressedData], fileName));
+          if (!pathName.endsWith("/")) {
+            const compressedData = arrayBuffer.slice(dataOffset, dataOffset + compressedSize);
+            const blob = await this.decompressData(compressedData);
+            const fileName = pathName.split('/').pop();
+            files.push(new File([blob], fileName));
           }
         }
         return files;
-      };
+      },
+
       /**
-       * @param {File[]} sourceFiles
-       * @returns {Promise<File[]>}
+       * Unzips an array of files, handling both ZIP archives and regular files.
+       * @param {File[]} sourceFiles - The list of dropped files.
+       * @returns {Promise<File[]>} A flattened array of all files (extracted and original).
        */
-      const unzipFiles = async (sourceFiles) => {
-        const unCompressPromises = sourceFiles.map(async (file) => {
-          if (
-            file.type.match(/^application\/(x-zip-compressed|zip)$/) ||
-            file.name.match(/\.zip$/i)
-          ) {
-            return file.arrayBuffer().then(decompressZip);
+      async unzipFiles(sourceFiles) {
+        const files = await Promise.all(sourceFiles.map(async (file) => {
+          if (this.isZip(file)) {
+            return this.parse(await file.arrayBuffer());
           }
           return file;
-        });
-        return Promise.all(unCompressPromises).then((files) => {
-          return files.flat();
-        });
-      };
+        }));
+        return files.flat();
+      },
 
       /**
-       * @param {File[]} allFiles
-       * @param {string} targetName
-       * @returns {Promise<[string, string][]>}
-       * */
-      const convertXsl = async (allFiles, targetName = null) => {
-        const documentFiles = Promise.all(
-          allFiles
-            .filter((file) => file.name.match(/\.xml$|\.xsl$/i))
-            .map(async (file) => {
-              const parser = new DOMParser();
-              const xml = parser.parseFromString(
-                await file.text(),
-                "application/xml"
-              );
-              return [file.name, xml];
-            })
+       * Checks if a file is a ZIP archive.
+       * @param {File} file - The file to check.
+       * @returns {boolean} True if the file is a ZIP.
+       */
+      isZip(file) {
+        return file.type.match(/^application\/(x-zip-compressed|zip)$/) || file.name.match(/\.zip$/i);
+      }
+    };
+
+    /**
+     * Handles XSLT transformations.
+     * @namespace
+     */
+    const XslTransformer = {
+      /**
+       * Transforms XML files using XSLT.
+       * @param {File[]} allFiles - All available files (for resolving references).
+       * @param {string|null} [targetName=null] - Optional specific file name to transform.
+       * @returns {Promise<[string, string][]>} An array of [filename, transformedHTML] pairs.
+       */
+      async transform(allFiles, targetName = null) {
+        const fileMap = await this.createFileMap(allFiles);
+        let xmlFiles = allFiles.filter(f => f.name.match(/\.xml$/i));
+
+        if (targetName) {
+          xmlFiles = xmlFiles.filter(f => f.name === targetName);
+        }
+
+        return Promise.all(xmlFiles.map(file => this.processXmlFile(file, fileMap)));
+      },
+
+      /**
+       * Creates a map of filenames to parsed XML Documents.
+       * @param {File[]} files - The list of files.
+       * @returns {Promise<Object<string, Document>>} A map of filename -> XML Document.
+       */
+      async createFileMap(files) {
+        const entries = await Promise.all(files.filter(f => f.name.match(/\.xml$|\.xsl$/i)).map(async f => {
+          return [f.name, new DOMParser().parseFromString(await f.text(), "application/xml")];
+        }));
+        return Object.fromEntries(entries);
+      },
+
+      /**
+       * Processes a single XML file, applying XSLT.
+       * @param {File} file - The XML file to process.
+       * @param {Object<string, Document>} fileMap - Map of available XML/XSL documents.
+       * @returns {[string, string]} The filename and the transformed HTML string.
+       */
+      processXmlFile(file, fileMap) {
+        const xmlDoc = fileMap[file.name];
+        const xsltProcessor = new XSLTProcessor();
+
+        this.importStylesheets(xmlDoc, fileMap, xsltProcessor);
+
+        const resultDoc = xsltProcessor.transformToDocument(xmlDoc);
+        return [file.name, new XMLSerializer().serializeToString(resultDoc)];
+      },
+
+      /**
+       * Imports linked XSL stylesheets into the processor.
+       * @param {Document} xmlDoc - The source XML document.
+       * @param {Object<string, Document>} fileMap - Map of available documents.
+       * @param {XSLTProcessor} xsltProcessor - The processor instance.
+       */
+      importStylesheets(xmlDoc, fileMap, xsltProcessor) {
+        const styleNodes = Array.from(xmlDoc.childNodes).filter(
+          node => node.nodeType === Node.PROCESSING_INSTRUCTION_NODE && node.target === "xml-stylesheet"
         );
-        return documentFiles.then((files) => {
-          const fileMap = Object.fromEntries(files);
-          let xmlDocs = files.filter(([name]) => name.match(/\.xml$/i));
-          
-          if (targetName) {
-            xmlDocs = xmlDocs.filter(([name]) => name === targetName);
+
+        styleNodes.forEach(node => {
+          const hrefMatch = node.data.match(/href="([^"]+)"/);
+          if (hrefMatch) {
+            const xslDoc = fileMap[hrefMatch[1]];
+            if (xslDoc) xsltProcessor.importStylesheet(xslDoc);
           }
-
-          const documents = xmlDocs.map(([name, xmlDoc]) => {
-            const xsltProcessor = new XSLTProcessor();
-            const styleNodes = Array.from(xmlDoc.childNodes).filter(
-              (node) =>
-                node.nodeType === Node.PROCESSING_INSTRUCTION_NODE &&
-                node.target === "xml-stylesheet"
-            );
-            styleNodes.forEach((styleNode) => {
-              const hrefMatch = styleNode.data.match(/href="([^"]+)"/);
-              if (hrefMatch) {
-                const href = hrefMatch[1];
-                const xslDoc = fileMap[href];
-                if (xslDoc) xsltProcessor.importStylesheet(xslDoc);
-              }
-            });
-            const resultDoc = xsltProcessor.transformToDocument(xmlDoc);
-            const serializer = new XMLSerializer();
-            const resultString = serializer.serializeToString(resultDoc);
-            return [name, resultString];
-          });
-          return documents;
         });
-      };
+      }
+    };
 
-      const renderDocs = (docs, allFiles, shouldScroll = true) => {
-        const body = document.body;
-        docs.forEach(([name, doc]) => {
-          const div = document.createElement("div");
-          div.setAttribute("class", "container");
-          const header = document.createElement("h1");
-          header.innerText = name;
-          const iframe = document.createElement("iframe");
-          iframe.style.width = "100%";
-          iframe.style.border = "none";
-          iframe.scrolling = "no";
-          div.append(header, iframe);
-          body.append(div);
-          const iframeDoc = iframe.contentWindow.document;
-          iframeDoc.open();
-          iframeDoc.write(doc);
-          const style = iframeDoc.createElement("style");
-          style.textContent = `
-              html,body {
-                margin: 0;
-                padding: 0;
-              }
-              body {
-                padding-right: 24px;
-              }
-              body > div {
-                white-space: normal;
-              }
-              pre.oshirase {
-                text-wrap-mode: wrap;
-              }
-              pre.normal {
-                text-wrap: auto;
-              }
-            `;
-          iframeDoc.head.appendChild(style);
-          iframeDoc.close();
+    /**
+     * Manages the Viewer UI and interactions.
+     * @namespace
+     */
+    const Viewer = {
+      /** @type {File[]} List of currently loaded files. */
+      allFiles: [],
 
-          const resize = () => {
-            iframe.style.height =
-              iframe.contentWindow.document.documentElement.scrollHeight + "px";
-            iframe.style.width =
-              iframe.contentWindow.document.documentElement.scrollWidth + "px";
-          };
-          iframe.onload = resize;
-          resize();
+      /**
+       * Initializes the viewer by attaching global event listeners.
+       */
+      init() {
+        document.body.addEventListener("dragover", e => e.preventDefault());
+        document.body.addEventListener("drop", e => this.handleDrop(e));
+      },
 
-          iframeDoc.addEventListener("click", (e) => {
-            const a = e.target.closest("a");
-            if (a && a.getAttribute("href")) {
-              const href = a.getAttribute("href");
-              if (href.match(/^(https?:|mailto:|tel:)/)) return;
+      /**
+       * Handles the file drop event.
+       * @param {DragEvent} e - The drop event.
+       */
+      async handleDrop(e) {
+        e.preventDefault();
+        this.allFiles = await ZipUtils.unzipFiles(Array.from(e.dataTransfer.files));
+        const docs = await XslTransformer.transform(this.allFiles);
 
-              const decodedHref = decodeURIComponent(href);
-              const targetFileName = decodedHref.replace(/.*\//, "");
+        document.body.innerHTML = "";
+        this.renderDocs(docs, false);
+      },
 
-              const existingHeader = Array.from(document.querySelectorAll("h1")).find(h1 => h1.innerText === targetFileName);
-              if (existingHeader) {
-                e.preventDefault();
-                existingHeader.parentElement.scrollIntoView({ behavior: "smooth" });
-                return;
-              }
+      /**
+       * Renders the transformed documents into the DOM.
+       * @param {[string, string][]} docs - Array of [filename, content] pairs.
+       * @param {boolean} [shouldScroll=true] - Whether to scroll the new content into view.
+       */
+      renderDocs(docs, shouldScroll = true) {
+        const containerList = document.createElement("div");
+        containerList.className = "container-list";
+        document.body.appendChild(containerList);
 
-              const targetFile = allFiles.find((f) => f.name === targetFileName);
-              if (targetFile) {
-                e.preventDefault();
-                if (targetFile.name.match(/\.xml$/i)) {
-                  convertXsl(allFiles, targetFile.name).then((newDocs) => {
-                    renderDocs(newDocs, allFiles);
-                  });
-                } else {
-                  const url = URL.createObjectURL(targetFile);
-                  const downloadLink = document.createElement("a");
-                  downloadLink.href = url;
-                  downloadLink.download = targetFile.name;
-                  downloadLink.click();
-                  setTimeout(() => URL.revokeObjectURL(url), 100);
-                }
+        docs.forEach(([name, content]) => {
+          const container = this.createDocContainer(name, content);
+          containerList.appendChild(container);
+          if (shouldScroll) {
+            container.scrollIntoView({ behavior: "smooth" });
+          }
+        });
+      },
+
+      /**
+       * Creates a container element for a document.
+       * @param {string} name - The document name.
+       * @param {string} content - The HTML content.
+       * @returns {HTMLDivElement} The created container element.
+       */
+      createDocContainer(name, content) {
+        const div = document.createElement("div");
+        div.className = "container";
+
+        const header = document.createElement("h1");
+        header.innerText = name;
+
+        const iframe = document.createElement("iframe");
+
+        div.append(header, iframe);
+
+        // Wait for append to access contentWindow
+        requestAnimationFrame(() => {
+          this.writeIframeContent(iframe, content);
+          this.setupIframeResize(iframe);
+          this.attachLinkHandler(iframe);
+        });
+
+        return div;
+      },
+
+      /**
+       * Writes content and styles into the iframe.
+       * @param {HTMLIFrameElement} iframe - The iframe element.
+       * @param {string} content - The HTML content to write.
+       */
+      writeIframeContent(iframe, content) {
+        const doc = iframe.contentWindow.document;
+        doc.open();
+        doc.write(content);
+        const style = doc.createElement("style");
+        style.textContent = `
+            body > div { white-space: normal; }
+            pre.oshirase { text-wrap-mode: wrap; }
+            pre.normal { text-wrap: auto; }
+            @media print {
+              body::-webkit-scrollbar  {
+                display: none;
               }
             }
-          });
-          if (shouldScroll) {
-            div.scrollIntoView({ behavior: "smooth" });
-          }
-        });
-      };
+          `;
+        doc.head.appendChild(style);
+        const base = doc.createElement("base");
+        base.target = "_blank";
+        doc.head.appendChild(base);
 
-      const handleDrop = (e) => {
-        e.preventDefault();
-        unzipFiles(Array.from(e.dataTransfer.files)).then((allFiles) => {
-          convertXsl(allFiles).then((docs) => {
-            document.body.innerHTML = "";
-            renderDocs(docs, allFiles, false);
-          });
-        });
-      };
-    </script>
-  </head>
-  <body ondragover="event.preventDefault()" ondrop="handleDrop(event)">
-    <div
-      style="
+        doc.close();
+      },
+
+      /**
+       * Configures auto-resizing for the iframe.
+       * @param {HTMLIFrameElement} iframe - The iframe element.
+       */
+      setupIframeResize(iframe) {
+        const resize = () => {
+          const doc = iframe.contentWindow.document.documentElement;
+          iframe.style.height = doc.scrollHeight + "px";
+          iframe.style.width = doc.scrollWidth + "px";
+        };
+        iframe.onload = resize;
+        resize();
+      },
+
+      /**
+       * Attaches a click handler to the iframe's document to intercept internal links.
+       * @param {HTMLIFrameElement} iframe - The iframe element.
+       */
+      attachLinkHandler(iframe) {
+        iframe.contentWindow.document.addEventListener("click", (e) => this.handleLinkClick(e));
+      },
+
+      /**
+       * Handles link clicks within the iframe.
+       * @param {Event} e - The click event.
+       */
+      handleLinkClick(e) {
+        const a = e.target.closest("a");
+        if (!a || !a.getAttribute("href")) return;
+
+        const href = a.getAttribute("href");
+        if (href.match(/^(https?:|mailto:|tel:)/)) return;
+
+        const decodedHref = decodeURIComponent(href);
+        const targetFileName = decodedHref.split('/').pop();
+
+        // Check for existing
+        const existing = Array.from(document.querySelectorAll("h1")).find(h => h.innerText === targetFileName);
+        if (existing) {
+          e.preventDefault();
+          existing.parentElement.scrollIntoView({ behavior: "smooth" });
+          return;
+        }
+
+        const targetFile = this.allFiles.find(f => f.name === targetFileName);
+        if (targetFile) {
+          e.preventDefault();
+          this.processInternalLink(targetFile);
+        }
+      },
+
+      /**
+       * Processes an internal link click (either transform XML or download file).
+       * @param {File} file - The target file.
+       */
+      async processInternalLink(file) {
+        if (file.name.match(/\.xml$/i)) {
+          const newDocs = await XslTransformer.transform(this.allFiles, file.name);
+          this.renderDocs(newDocs, true);
+        } else {
+          this.downloadFile(file);
+        }
+      },
+
+      /**
+       * Triggers a file download.
+       * @param {File} file - The file to download.
+       */
+      downloadFile(file) {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+      }
+    };
+
+    // Auto-init
+    window.addEventListener('DOMContentLoaded', () => Viewer.init());
+  </script>
+</head>
+
+<body>
+  <div style="
         height: 100vh;
         display: flex;
         justify-content: center;
         align-items: center;
-      "
-    >
-      <span
-        style="
+      ">
+    <span style="
           padding: 16px;
           font-size: 2em;
           border: 2px dashed black;
           border-radius: 16px;
-        "
-      >
-        Drop files or zip-file here
-      </span>
-    </div>
-  </body>
+        ">
+      Drop files or zip-file here
+    </span>
+  </div>
+</body>
+
 </html>
