@@ -11,10 +11,29 @@
       min-height: 100%;
       min-width: 100%;
       margin: 0;
+      font-family: sans-serif;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: normal;
+      border-radius: 4px;
+      background-color: #eeeeee;
+      padding: 4px;
     }
 
     .container {
-      padding: 0 16px;
+      padding: 0 12px;
+    }
+
+    .container-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .container-list>*+* {
+      border-top: 1px solid #e5e7eb;
     }
 
     iframe {
@@ -24,15 +43,20 @@
       margin: auto;
     }
 
-    .container-list {
+    .drop-zone {
+      height: 100vh;
       display: flex;
-      flex-direction: column;
-      gap: 16px;
-
+      justify-content: center;
+      align-items: center;
     }
 
-    .container-list>*+* {
-      border-top: 1px solid #e5e7eb;
+    .drop-message {
+      padding: 16px;
+      font-size: 2em;
+      border: 2px dashed #000;
+      border-radius: 16px;
+      color: #333;
+      user-select: none;
     }
 
     @media print {
@@ -42,10 +66,14 @@
 
       .container {
         padding: 0;
+      }
 
-        &>h1 {
-          display: none;
-        }
+      .container>h1 {
+        display: none;
+      }
+
+      .drop-zone {
+        display: none;
       }
     }
   </style>
@@ -81,13 +109,14 @@
 
         while (offset < dataView.byteLength) {
           const signature = dataView.getUint32(offset, true);
-          if (signature !== 0x04034b50) break;
+          if (signature !== 0x04034b50) break; // End of central directory or invalid signature
 
           const generalPurposeFlag = dataView.getUint16(offset + 6, true);
           const fileNameLength = dataView.getUint16(offset + 26, true);
           const extraFieldLength = dataView.getUint16(offset + 28, true);
           let compressedSize = dataView.getUint32(offset + 18, true);
 
+          // Decode file name
           const isUtf8 = (generalPurposeFlag & 0x0800) !== 0;
           const fileNameBuffer = arrayBuffer.slice(offset + 30, offset + 30 + fileNameLength);
           const pathName = (isUtf8 ? decoderUtf8 : decoderSjis).decode(fileNameBuffer);
@@ -95,14 +124,14 @@
           offset += 30 + fileNameLength + extraFieldLength;
           const dataOffset = offset;
 
-          // Check for Data Descriptor
+          // Check for Data Descriptor (bit 3 set)
           const isDataDescriptor = (generalPurposeFlag & 0x0008) !== 0;
           if (isDataDescriptor) {
-            // Scan for signature 0x08074b50
+            // Scan for data descriptor signature 0x08074b50
             while (offset < dataView.byteLength) {
               if (dataView.getUint32(offset, true) === 0x08074b50) {
                 compressedSize = dataView.getUint32(offset + 8, true);
-                offset += 16;
+                offset += 16; // Skip signature (4) + crc32 (4) + compressed (4) + uncompressed (4)
                 break;
               }
               offset++;
@@ -111,6 +140,7 @@
             offset += compressedSize;
           }
 
+          // Skip directories
           if (!pathName.endsWith("/")) {
             const compressedData = arrayBuffer.slice(dataOffset, dataOffset + compressedSize);
             const blob = await this.decompressData(compressedData);
@@ -127,13 +157,15 @@
        * @returns {Promise<File[]>} A flattened array of all files (extracted and original).
        */
       async unzipFiles(sourceFiles) {
-        const files = await Promise.all(sourceFiles.map(async (file) => {
-          if (this.isZip(file)) {
-            return this.parse(await file.arrayBuffer());
-          }
-          return file;
-        }));
-        return files.flat();
+        const nestedFiles = await Promise.all(
+          sourceFiles.map(async (file) => {
+            if (this.isZip(file)) {
+              return this.parse(await file.arrayBuffer());
+            }
+            return file;
+          })
+        );
+        return nestedFiles.flat();
       },
 
       /**
@@ -142,7 +174,10 @@
        * @returns {boolean} True if the file is a ZIP.
        */
       isZip(file) {
-        return file.type.match(/^application\/(x-zip-compressed|zip)$/) || file.name.match(/\.zip$/i);
+        return (
+          file.type.match(/^application\/(x-zip-compressed|zip)$/) ||
+          file.name.match(/\.zip$/i)
+        );
       }
     };
 
@@ -159,13 +194,13 @@
        */
       async transform(allFiles, targetName = null) {
         const fileMap = await this.createFileMap(allFiles);
-        let xmlFiles = allFiles.filter(f => f.name.match(/\.xml$/i));
+        let xmlFiles = allFiles.filter((f) => f.name.match(/\.xml$/i));
 
         if (targetName) {
-          xmlFiles = xmlFiles.filter(f => f.name === targetName);
+          xmlFiles = xmlFiles.filter((f) => f.name === targetName);
         }
 
-        return Promise.all(xmlFiles.map(file => this.processXmlFile(file, fileMap)));
+        return Promise.all(xmlFiles.map((file) => this.processXmlFile(file, fileMap)));
       },
 
       /**
@@ -174,9 +209,16 @@
        * @returns {Promise<Object<string, Document>>} A map of filename -> XML Document.
        */
       async createFileMap(files) {
-        const entries = await Promise.all(files.filter(f => f.name.match(/\.xml$|\.xsl$/i)).map(async f => {
-          return [f.name, new DOMParser().parseFromString(await f.text(), "application/xml")];
-        }));
+        const parser = new DOMParser();
+        const entries = await Promise.all(
+          files
+            .filter((f) => f.name.match(/\.xml$|\.xsl$/i))
+            .map(async (f) => {
+              const text = await f.text();
+              const doc = parser.parseFromString(text, "application/xml");
+              return [f.name, doc];
+            })
+        );
         return Object.fromEntries(entries);
       },
 
@@ -193,7 +235,8 @@
         this.importStylesheets(xmlDoc, fileMap, xsltProcessor);
 
         const resultDoc = xsltProcessor.transformToDocument(xmlDoc);
-        return [file.name, new XMLSerializer().serializeToString(resultDoc)];
+        const serializer = new XMLSerializer();
+        return [file.name, serializer.serializeToString(resultDoc)];
       },
 
       /**
@@ -204,10 +247,12 @@
        */
       importStylesheets(xmlDoc, fileMap, xsltProcessor) {
         const styleNodes = Array.from(xmlDoc.childNodes).filter(
-          node => node.nodeType === Node.PROCESSING_INSTRUCTION_NODE && node.target === "xml-stylesheet"
+          (node) =>
+            node.nodeType === Node.PROCESSING_INSTRUCTION_NODE &&
+            node.target === "xml-stylesheet"
         );
 
-        styleNodes.forEach(node => {
+        styleNodes.forEach((node) => {
           const hrefMatch = node.data.match(/href="([^"]+)"/);
           if (hrefMatch) {
             const xslDoc = fileMap[hrefMatch[1]];
@@ -229,8 +274,8 @@
        * Initializes the viewer by attaching global event listeners.
        */
       init() {
-        document.body.addEventListener("dragover", e => e.preventDefault());
-        document.body.addEventListener("drop", e => this.handleDrop(e));
+        document.body.addEventListener("dragover", (e) => e.preventDefault());
+        document.body.addEventListener("drop", (e) => this.handleDrop(e));
       },
 
       /**
@@ -239,10 +284,12 @@
        */
       async handleDrop(e) {
         e.preventDefault();
-        this.allFiles = await ZipUtils.unzipFiles(Array.from(e.dataTransfer.files));
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length === 0) return;
+
+        this.allFiles = await ZipUtils.unzipFiles(files);
         const docs = await XslTransformer.transform(this.allFiles);
 
-        document.body.innerHTML = "";
         this.renderDocs(docs, false);
       },
 
@@ -252,9 +299,17 @@
        * @param {boolean} [shouldScroll=true] - Whether to scroll the new content into view.
        */
       renderDocs(docs, shouldScroll = true) {
-        const containerList = document.createElement("div");
-        containerList.className = "container-list";
-        document.body.appendChild(containerList);
+        // Clear existing content if it's the initial drop
+        if (!shouldScroll) {
+          document.body.innerHTML = "";
+        }
+
+        let containerList = document.querySelector(".container-list");
+        if (!containerList) {
+          containerList = document.createElement("div");
+          containerList.className = "container-list";
+          document.body.appendChild(containerList);
+        }
 
         docs.forEach(([name, content]) => {
           const container = this.createDocContainer(name, content);
@@ -301,18 +356,18 @@
         const doc = iframe.contentWindow.document;
         doc.open();
         doc.write(content);
+
         const style = doc.createElement("style");
         style.textContent = `
-            body > div { white-space: normal; }
-            pre.oshirase { text-wrap-mode: wrap; }
-            pre.normal { text-wrap: auto; }
-            @media print {
-              body::-webkit-scrollbar  {
-                display: none;
-              }
-            }
-          `;
+          body > div { white-space: normal; }
+          pre.oshirase { text-wrap-mode: wrap; }
+          pre.normal { text-wrap: auto; }
+          @media print {
+            body::-webkit-scrollbar { display: none; }
+          }
+        `;
         doc.head.appendChild(style);
+
         const base = doc.createElement("base");
         base.target = "_blank";
         doc.head.appendChild(base);
@@ -326,9 +381,9 @@
        */
       setupIframeResize(iframe) {
         const resize = () => {
-          const doc = iframe.contentWindow.document.documentElement;
-          iframe.style.height = doc.scrollHeight + "px";
-          iframe.style.width = doc.scrollWidth + "px";
+          const docEl = iframe.contentWindow.document.documentElement;
+          iframe.style.height = docEl.scrollHeight + "px";
+          iframe.style.width = docEl.scrollWidth + "px";
         };
         iframe.onload = resize;
         resize();
@@ -339,7 +394,9 @@
        * @param {HTMLIFrameElement} iframe - The iframe element.
        */
       attachLinkHandler(iframe) {
-        iframe.contentWindow.document.addEventListener("click", (e) => this.handleLinkClick(e));
+        iframe.contentWindow.document.addEventListener("click", (e) =>
+          this.handleLinkClick(e)
+        );
       },
 
       /**
@@ -356,15 +413,17 @@
         const decodedHref = decodeURIComponent(href);
         const targetFileName = decodedHref.split('/').pop();
 
-        // Check for existing
-        const existing = Array.from(document.querySelectorAll("h1")).find(h => h.innerText === targetFileName);
+        // Check for existing document in view
+        const existing = Array.from(document.querySelectorAll("h1")).find(
+          (h) => h.innerText === targetFileName
+        );
         if (existing) {
           e.preventDefault();
           existing.parentElement.scrollIntoView({ behavior: "smooth" });
           return;
         }
 
-        const targetFile = this.allFiles.find(f => f.name === targetFileName);
+        const targetFile = this.allFiles.find((f) => f.name === targetFileName);
         if (targetFile) {
           e.preventDefault();
           this.processInternalLink(targetFile);
@@ -398,24 +457,13 @@
       }
     };
 
-    // Auto-init
-    window.addEventListener('DOMContentLoaded', () => Viewer.init());
+    window.addEventListener("DOMContentLoaded", () => Viewer.init());
   </script>
 </head>
 
 <body>
-  <div style="
-        height: 100vh;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-      ">
-    <span style="
-          padding: 16px;
-          font-size: 2em;
-          border: 2px dashed black;
-          border-radius: 16px;
-        ">
+  <div class="drop-zone">
+    <span class="drop-message">
       Drop files or zip-file here
     </span>
   </div>
