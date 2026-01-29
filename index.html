@@ -10,22 +10,7 @@
         min-height: 100%;
         min-width: 100%;
         margin: 0;
-        padding: 0;
-      }
-      .container {
         padding: 16px;
-      }
-      .container > div {
-        /* 健康保険・厚生年金保険被保険者標準報酬改定通知書 を表示する際に、コンテンツの中から div 要素全てに white-space: pre が指定されて、大きな余白が出る問題への対処。 */
-        white-space: normal;
-      }
-      pre.oshirase {
-        /* 健康保険・厚生年金保険被保険者標準報酬改定通知書 をMacのFirefox&Chromeで表示する際に「CSSを完全に理解」状態になる問題への対応。なぜかSafariはこれ無しで正しく動作する。*/
-        text-wrap-mode: wrap;
-      }
-      pre.normal {
-        /* 保険料納入告知額・領収済額通知書 をMacで表示した場合のレイアウト崩れ対応。 */
-        text-wrap: auto;
       }
       @media print {
         .container {
@@ -36,6 +21,7 @@
             display: none;
         }
       }
+
     </style>
     <script>
       /**
@@ -68,9 +54,13 @@
           const fileNameLength = dataView.getUint16(offset + 26, true);
           const extraFieldLength = dataView.getUint16(offset + 28, true);
           let compressedSize = dataView.getUint32(offset + 18, true);
-          const pathName = new TextDecoder().decode(
+          
+          const isUtf8 = (generalPurposeFlag & 0x0800) !== 0;
+          const decoder = new TextDecoder(isUtf8 ? "utf-8" : "shift-jis");
+          const pathName = decoder.decode(
             arrayBuffer.slice(offset + 30, offset + 30 + fileNameLength)
           );
+
           offset += fileNameLength + extraFieldLength + 30;
           const dataOffset = offset;
           const isDataDescriptor = (generalPurposeFlag & 0x0008) !== 0;
@@ -101,37 +91,49 @@
       };
       /**
        * @param {File[]} sourceFiles
-       * @returns {Promise<[string, string][]>}
-       * */
-      const convertXsl = async (sourceFiles) => {
+       * @returns {Promise<File[]>}
+       */
+      const unzipFiles = async (sourceFiles) => {
         const unCompressPromises = sourceFiles.map(async (file) => {
-          if (file.type.match(/^application\/(x-zip-compressed|zip)$/)) {
+          if (
+            file.type.match(/^application\/(x-zip-compressed|zip)$/) ||
+            file.name.match(/\.zip$/i)
+          ) {
             return file.arrayBuffer().then(decompressZip);
           }
           return file;
         });
-        const unCompressFiles = Promise.all(unCompressPromises).then(
-          (files) => {
-            return files.flat();
-          }
-        );
-        const documentFiles = unCompressFiles.then(async (files) => {
-          return Promise.all(
-            files
-              .filter((file) => file.name.match(/\.xml$|\.xsl$/))
-              .map(async (file) => {
-                const parser = new DOMParser();
-                const xml = parser.parseFromString(
-                  await file.text(),
-                  "application/xml"
-                );
-                return [file.name, xml];
-              })
-          );
+        return Promise.all(unCompressPromises).then((files) => {
+          return files.flat();
         });
+      };
+
+      /**
+       * @param {File[]} allFiles
+       * @param {string} targetName
+       * @returns {Promise<[string, string][]>}
+       * */
+      const convertXsl = async (allFiles, targetName = null) => {
+        const documentFiles = Promise.all(
+          allFiles
+            .filter((file) => file.name.match(/\.xml$|\.xsl$/i))
+            .map(async (file) => {
+              const parser = new DOMParser();
+              const xml = parser.parseFromString(
+                await file.text(),
+                "application/xml"
+              );
+              return [file.name, xml];
+            })
+        );
         return documentFiles.then((files) => {
           const fileMap = Object.fromEntries(files);
-          const xmlDocs = files.filter(([name]) => name.endsWith(".xml"));
+          let xmlDocs = files.filter(([name]) => name.match(/\.xml$/i));
+          
+          if (targetName) {
+            xmlDocs = xmlDocs.filter(([name]) => name === targetName);
+          }
+
           const documents = xmlDocs.map(([name, xmlDoc]) => {
             const xsltProcessor = new XSLTProcessor();
             const styleNodes = Array.from(xmlDoc.childNodes).filter(
@@ -140,9 +142,12 @@
                 node.target === "xml-stylesheet"
             );
             styleNodes.forEach((styleNode) => {
-              const href = styleNode.data.match(/href="([^"]+)"/)[1];
-              const xslDoc = fileMap[href];
-              if (xslDoc) xsltProcessor.importStylesheet(xslDoc);
+              const hrefMatch = styleNode.data.match(/href="([^"]+)"/);
+              if (hrefMatch) {
+                const href = hrefMatch[1];
+                const xslDoc = fileMap[href];
+                if (xslDoc) xsltProcessor.importStylesheet(xslDoc);
+              }
             });
             const resultDoc = xsltProcessor.transformToDocument(xmlDoc);
             const serializer = new XMLSerializer();
@@ -152,23 +157,101 @@
           return documents;
         });
       };
+
+      const renderDocs = (docs, allFiles, shouldScroll = true) => {
+        const body = document.body;
+        docs.forEach(([name, doc]) => {
+          const div = document.createElement("div");
+          div.setAttribute("class", "container");
+          const header = document.createElement("h1");
+          header.innerText = name;
+          const iframe = document.createElement("iframe");
+          iframe.style.width = "100%";
+          iframe.style.border = "none";
+          iframe.scrolling = "no";
+          div.append(header, iframe);
+          body.append(div);
+          const iframeDoc = iframe.contentWindow.document;
+          iframeDoc.open();
+          iframeDoc.write(doc);
+          const style = iframeDoc.createElement("style");
+          style.textContent = `
+              html,body {
+                margin: 0;
+                padding: 0;
+              }
+              body {
+                padding-right: 24px;
+              }
+              body > div {
+                white-space: normal;
+              }
+              pre.oshirase {
+                text-wrap-mode: wrap;
+              }
+              pre.normal {
+                text-wrap: auto;
+              }
+            `;
+          iframeDoc.head.appendChild(style);
+          iframeDoc.close();
+
+          const resize = () => {
+            iframe.style.height =
+              iframe.contentWindow.document.documentElement.scrollHeight + "px";
+            iframe.style.width =
+              iframe.contentWindow.document.documentElement.scrollWidth + "px";
+          };
+          iframe.onload = resize;
+          resize();
+
+          iframeDoc.addEventListener("click", (e) => {
+            const a = e.target.closest("a");
+            if (a && a.getAttribute("href")) {
+              const href = a.getAttribute("href");
+              if (href.match(/^(https?:|mailto:|tel:)/)) return;
+
+              const decodedHref = decodeURIComponent(href);
+              const targetFileName = decodedHref.replace(/.*\//, "");
+
+              const existingHeader = Array.from(document.querySelectorAll("h1")).find(h1 => h1.innerText === targetFileName);
+              if (existingHeader) {
+                e.preventDefault();
+                existingHeader.parentElement.scrollIntoView({ behavior: "smooth" });
+                return;
+              }
+
+              const targetFile = allFiles.find((f) => f.name === targetFileName);
+              if (targetFile) {
+                e.preventDefault();
+                if (targetFile.name.match(/\.xml$/i)) {
+                  convertXsl(allFiles, targetFile.name).then((newDocs) => {
+                    renderDocs(newDocs, allFiles);
+                  });
+                } else {
+                  const url = URL.createObjectURL(targetFile);
+                  const downloadLink = document.createElement("a");
+                  downloadLink.href = url;
+                  downloadLink.download = targetFile.name;
+                  downloadLink.click();
+                  setTimeout(() => URL.revokeObjectURL(url), 100);
+                }
+              }
+            }
+          });
+          if (shouldScroll) {
+            div.scrollIntoView({ behavior: "smooth" });
+          }
+        });
+      };
+
       const handleDrop = (e) => {
         e.preventDefault();
-        convertXsl(Array.from(e.dataTransfer.files)).then((docs) => {
-          const body = document.body;
-          body.innerHTML = "";
-          const nodes = docs.map(([name, doc]) => {
-            const contents = document.createElement("div");
-            contents.innerHTML = doc;
-            const div = document.createElement("div");
-            div.setAttribute("class", "container");
-            const header = document.createElement("h1");
-            header.innerText = name;
-            const hr = document.createElement("hr");
-            div.append(header, contents, hr);
-            return div;
+        unzipFiles(Array.from(e.dataTransfer.files)).then((allFiles) => {
+          convertXsl(allFiles).then((docs) => {
+            document.body.innerHTML = "";
+            renderDocs(docs, allFiles, false);
           });
-          body.append(...nodes);
         });
       };
     </script>
