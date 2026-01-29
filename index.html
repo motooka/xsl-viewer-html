@@ -109,14 +109,13 @@
 
         while (offset < dataView.byteLength) {
           const signature = dataView.getUint32(offset, true);
-          if (signature !== 0x04034b50) break; // End of central directory or invalid signature
+          if (signature !== 0x04034b50) break;
 
           const generalPurposeFlag = dataView.getUint16(offset + 6, true);
           const fileNameLength = dataView.getUint16(offset + 26, true);
           const extraFieldLength = dataView.getUint16(offset + 28, true);
           let compressedSize = dataView.getUint32(offset + 18, true);
 
-          // Decode file name
           const isUtf8 = (generalPurposeFlag & 0x0800) !== 0;
           const fileNameBuffer = arrayBuffer.slice(offset + 30, offset + 30 + fileNameLength);
           const pathName = (isUtf8 ? decoderUtf8 : decoderSjis).decode(fileNameBuffer);
@@ -124,14 +123,12 @@
           offset += 30 + fileNameLength + extraFieldLength;
           const dataOffset = offset;
 
-          // Check for Data Descriptor (bit 3 set)
           const isDataDescriptor = (generalPurposeFlag & 0x0008) !== 0;
           if (isDataDescriptor) {
-            // Scan for data descriptor signature 0x08074b50
             while (offset < dataView.byteLength) {
               if (dataView.getUint32(offset, true) === 0x08074b50) {
                 compressedSize = dataView.getUint32(offset + 8, true);
-                offset += 16; // Skip signature (4) + crc32 (4) + compressed (4) + uncompressed (4)
+                offset += 16;
                 break;
               }
               offset++;
@@ -140,7 +137,6 @@
             offset += compressedSize;
           }
 
-          // Skip directories
           if (!pathName.endsWith("/")) {
             const compressedData = arrayBuffer.slice(dataOffset, dataOffset + compressedSize);
             const blob = await this.decompressData(compressedData);
