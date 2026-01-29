@@ -1,6 +1,6 @@
 # xsl-viewer-html
 
-HTML ファイルひとつで、電子公文書が入った XLS ファイル入りの ZIP ファイルを展開し表示しします。  
+HTML ファイルひとつで、電子公文書が入った XLS ファイル入りの ZIP ファイルを展開し表示します。  
 外部ライブラリは一切使用していません。
 
 https://sorakumo001.github.io/xsl-viewer-html/
